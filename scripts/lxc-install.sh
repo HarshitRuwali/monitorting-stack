@@ -1,0 +1,496 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="$ROOT_DIR/.env"
+
+PACKAGES=(grafana prometheus loki alloy)
+CONFIG_ONLY=0
+NO_START=0
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/lxc-install.sh [--config-only] [--no-start]
+
+Installs the central monitoring stack directly into a Debian/Ubuntu LXC:
+  - Grafana from the Grafana APT repository
+  - Loki from the Grafana APT repository
+  - Alloy from the Grafana APT repository
+  - Prometheus from the distro APT repository
+
+Required:
+  Run as root inside a systemd-based LXC.
+  Set GRAFANA_ADMIN_PASSWORD in .env or export it before running.
+
+Useful environment variables:
+  GRAFANA_ADMIN_USER       default: admin
+  GRAFANA_ADMIN_PASSWORD   required
+  GRAFANA_ROOT_URL         default: http://localhost:3000
+  PROMETHEUS_RETENTION     default: 30d
+  MONITOR_HOSTNAME         default: current hostname
+  MONITOR_ROLE             default: central-lxc
+
+Options:
+  --config-only  Only render configs/dashboards and systemd overrides.
+  --no-start     Do not enable or restart services after writing config.
+USAGE
+}
+
+log() {
+  printf '[lxc-install] %s\n' "$*"
+}
+
+fail() {
+  printf '[lxc-install] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+require_root() {
+  [[ "${EUID}" -eq 0 ]] || fail "Run this script as root inside the LXC."
+  has_cmd apt-get || fail "apt-get is required. Use a Debian/Ubuntu LXC."
+  has_cmd systemctl || fail "systemctl is required. Use a systemd-based LXC."
+}
+
+load_env_file() {
+  local line key value
+
+  [[ -f "$ENV_FILE" ]] || return 0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+    if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+      value="${value%$'\r'}"
+
+      if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+        value="${value:1:${#value}-2}"
+      elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+
+      if [[ -z "${!key+x}" ]]; then
+        export "$key=$value"
+      fi
+    fi
+  done < "$ENV_FILE"
+}
+
+require_var() {
+  local name="$1"
+  local value="${!name:-}"
+  [[ -n "$value" ]] || fail "$name is required. Set it in .env or export it before running this command."
+}
+
+reject_placeholder_password() {
+  require_var GRAFANA_ADMIN_PASSWORD
+  if [[ "${GRAFANA_ADMIN_PASSWORD}" == "replace-with-a-strong-password" || "${GRAFANA_ADMIN_PASSWORD}" == "<strong-password>" ]]; then
+    fail "Set a real GRAFANA_ADMIN_PASSWORD before installing the LXC stack."
+  fi
+}
+
+write_env_assignment() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+
+  [[ "$value" != *$'\n'* ]] || fail "$key cannot contain newlines."
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s="%s"\n' "$key" "$value" >> "$file"
+}
+
+install_packages() {
+  export DEBIAN_FRONTEND=noninteractive
+
+  log "Installing APT prerequisites."
+  apt-get update
+  apt-get install -y apt-transport-https ca-certificates curl wget gnupg
+
+  log "Adding Grafana APT repository."
+  install -d -m 0755 /etc/apt/keyrings
+  wget -q -O /etc/apt/keyrings/grafana.asc https://apt.grafana.com/gpg-full.key
+  chmod 0644 /etc/apt/keyrings/grafana.asc
+  printf 'deb [signed-by=/etc/apt/keyrings/grafana.asc] https://apt.grafana.com stable main\n' > /etc/apt/sources.list.d/grafana.list
+
+  log "Installing monitoring packages."
+  apt-get update
+  apt-get install -y "${PACKAGES[@]}"
+}
+
+write_prometheus_config() {
+  local retention="${PROMETHEUS_RETENTION:-30d}"
+
+  log "Writing Prometheus config."
+  install -d -m 0755 /etc/prometheus /var/lib/prometheus
+  cat > /etc/prometheus/prometheus.yml <<'EOF'
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers: []
+
+rule_files: []
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
+EOF
+
+  install -d -m 0755 /etc/systemd/system/prometheus.service.d
+  cat > /etc/systemd/system/prometheus.service.d/monitoring.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=/usr/bin/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/var/lib/prometheus --storage.tsdb.retention.time=${retention} --web.enable-remote-write-receiver --web.enable-lifecycle --web.listen-address=0.0.0.0:9090
+EOF
+
+  if id -u prometheus >/dev/null 2>&1; then
+    chown -R prometheus:prometheus /var/lib/prometheus /etc/prometheus
+  fi
+}
+
+write_loki_config() {
+  log "Writing Loki config."
+  install -d -m 0755 /etc/loki /var/lib/loki/chunks /var/lib/loki/rules /var/lib/loki/compactor
+  cat > /etc/loki/loki-config.yml <<'EOF'
+auth_enabled: false
+
+server:
+  http_listen_address: 0.0.0.0
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /var/lib/loki
+  storage:
+    filesystem:
+      chunks_directory: /var/lib/loki/chunks
+      rules_directory: /var/lib/loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 100
+
+schema_config:
+  configs:
+    - from: 2024-04-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  retention_period: 720h
+  allow_structured_metadata: true
+  volume_enabled: true
+
+compactor:
+  working_directory: /var/lib/loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /var/lib/loki/rules
+EOF
+
+  install -d -m 0755 /etc/systemd/system/loki.service.d
+  cat > /etc/systemd/system/loki.service.d/monitoring.conf <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/loki -config.file=/etc/loki/loki-config.yml
+EOF
+
+  if id -u loki >/dev/null 2>&1; then
+    chown -R loki:loki /var/lib/loki /etc/loki
+  fi
+}
+
+write_grafana_config() {
+  local env_file="/etc/default/grafana-monitoring"
+  local dashboard
+
+  log "Writing Grafana provisioning config."
+  install -d -m 0755 \
+    /etc/grafana/provisioning/datasources \
+    /etc/grafana/provisioning/dashboards \
+    /var/lib/grafana/dashboards \
+    /etc/systemd/system/grafana-server.service.d
+
+  cat > /etc/grafana/provisioning/datasources/datasources.yml <<'EOF'
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://localhost:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: 15s
+      queryTimeout: 60s
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://localhost:3100
+    editable: true
+    jsonData:
+      maxLines: 1000
+EOF
+
+  install -m 0644 "$ROOT_DIR/grafana/provisioning/dashboards/dashboards.yml" /etc/grafana/provisioning/dashboards/dashboards.yml
+
+  shopt -s nullglob
+  for dashboard in "$ROOT_DIR"/grafana/dashboards/*.json; do
+    install -m 0644 "$dashboard" "/var/lib/grafana/dashboards/$(basename "$dashboard")"
+  done
+  shopt -u nullglob
+
+  : > "$env_file"
+  chmod 0600 "$env_file"
+  write_env_assignment "$env_file" GF_SECURITY_ADMIN_USER "${GRAFANA_ADMIN_USER:-admin}"
+  write_env_assignment "$env_file" GF_SECURITY_ADMIN_PASSWORD "${GRAFANA_ADMIN_PASSWORD}"
+  write_env_assignment "$env_file" GF_SERVER_ROOT_URL "${GRAFANA_ROOT_URL:-http://localhost:3000}"
+  write_env_assignment "$env_file" GF_USERS_ALLOW_SIGN_UP "false"
+
+  cat > /etc/systemd/system/grafana-server.service.d/monitoring.conf <<'EOF'
+[Service]
+EnvironmentFile=-/etc/default/grafana-monitoring
+EOF
+
+  if id -u grafana >/dev/null 2>&1; then
+    chown -R grafana:grafana /var/lib/grafana/dashboards
+  fi
+}
+
+write_alloy_config() {
+  local env_file="/etc/default/alloy"
+  local host_name="${MONITOR_HOSTNAME:-$(hostname -s)}"
+  local host_role="${MONITOR_ROLE:-central-lxc}"
+
+  log "Writing Alloy config."
+  install -d -m 0755 /etc/alloy /var/lib/alloy
+
+  cat > /etc/alloy/config.alloy <<'EOF'
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+prometheus.remote_write "central" {
+  external_labels = {
+    host = sys.env("MONITOR_HOSTNAME"),
+    role = sys.env("MONITOR_ROLE"),
+  }
+
+  endpoint {
+    name = "central-prometheus"
+    url  = sys.env("PROMETHEUS_REMOTE_WRITE_URL")
+  }
+}
+
+prometheus.exporter.unix "host" {
+  enable_collectors = ["systemd", "processes"]
+
+  filesystem {
+    mount_points_exclude = "^/(dev|proc|run/credentials/.+|sys|var/lib/.+)($|/)"
+  }
+
+  systemd {
+    enable_restarts = true
+    start_time      = true
+    task_metrics    = true
+  }
+}
+
+prometheus.scrape "host" {
+  job_name        = "host-unix"
+  targets         = prometheus.exporter.unix.host.targets
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.central.receiver]
+}
+
+prometheus.scrape "alloy" {
+  job_name   = "alloy"
+  targets    = [{"__address__" = "127.0.0.1:12345"}]
+  forward_to = [prometheus.remote_write.central.receiver]
+}
+
+loki.write "central" {
+  external_labels = {
+    host = sys.env("MONITOR_HOSTNAME"),
+    role = sys.env("MONITOR_ROLE"),
+  }
+
+  endpoint {
+    name = "central-loki"
+    url  = sys.env("LOKI_WRITE_URL")
+  }
+}
+
+loki.relabel "journal" {
+  forward_to = []
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+  }
+}
+
+loki.source.journal "system" {
+  max_age       = "12h"
+  labels        = {job = "systemd-journal", source = "journal"}
+  relabel_rules = loki.relabel.journal.rules
+  forward_to    = [loki.write.central.receiver]
+}
+EOF
+
+  if [[ -S /var/run/docker.sock ]]; then
+    cat >> /etc/alloy/config.alloy <<'EOF'
+
+prometheus.exporter.cadvisor "containers" {
+  docker_host      = "unix:///var/run/docker.sock"
+  docker_only      = true
+  storage_duration = "5m"
+}
+
+prometheus.scrape "containers" {
+  job_name        = "container-cadvisor"
+  targets         = prometheus.exporter.cadvisor.containers.targets
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.central.receiver]
+}
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "docker_logs" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_id"]
+    target_label  = "container_id"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "compose_service"
+  }
+
+  rule {
+    target_label = "source"
+    replacement  = "docker"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  labels     = {job = "docker"}
+  targets    = discovery.relabel.docker_logs.output
+  forward_to = [loki.write.central.receiver]
+}
+EOF
+  fi
+
+  : > "$env_file"
+  chmod 0644 "$env_file"
+  write_env_assignment "$env_file" CONFIG_FILE "/etc/alloy/config.alloy"
+  write_env_assignment "$env_file" CUSTOM_ARGS "--server.http.listen-addr=127.0.0.1:12345"
+  write_env_assignment "$env_file" MONITOR_HOSTNAME "$host_name"
+  write_env_assignment "$env_file" MONITOR_ROLE "$host_role"
+  write_env_assignment "$env_file" PROMETHEUS_REMOTE_WRITE_URL "http://127.0.0.1:9090/api/v1/write"
+  write_env_assignment "$env_file" LOKI_WRITE_URL "http://127.0.0.1:3100/loki/api/v1/push"
+
+  if id -u alloy >/dev/null 2>&1; then
+    chown -R alloy:alloy /var/lib/alloy /etc/alloy
+    getent group systemd-journal >/dev/null 2>&1 && usermod -aG systemd-journal alloy || true
+    getent group adm >/dev/null 2>&1 && usermod -aG adm alloy || true
+    getent group docker >/dev/null 2>&1 && usermod -aG docker alloy || true
+  fi
+}
+
+enable_and_restart_services() {
+  log "Enabling and restarting services."
+  systemctl daemon-reload
+  systemctl enable prometheus loki grafana-server alloy
+  systemctl restart prometheus loki grafana-server alloy
+}
+
+render_configs() {
+  load_env_file
+  reject_placeholder_password
+  write_prometheus_config
+  write_loki_config
+  write_grafana_config
+  write_alloy_config
+}
+
+main() {
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --config-only) CONFIG_ONLY=1 ;;
+      --no-start) NO_START=1 ;;
+      -h|--help) usage; exit 0 ;;
+      *) usage; fail "Unknown option: $1" ;;
+    esac
+    shift
+  done
+
+  require_root
+  cd "$ROOT_DIR"
+
+  if [[ "$CONFIG_ONLY" -eq 0 ]]; then
+    install_packages
+  fi
+
+  render_configs
+
+  if [[ "$NO_START" -eq 0 ]]; then
+    enable_and_restart_services
+  else
+    systemctl daemon-reload
+    log "Configs written. Services were not started because --no-start was used."
+  fi
+
+  log "LXC monitoring stack is ready. Grafana listens on port 3000."
+}
+
+main "$@"
