@@ -1,0 +1,17 @@
+.env
+*.local
+*.log
+.DS_Store
+
+# Local runtime data if bind mounts are used instead of named volumes.
+data/
+logs/
+prometheus-data/
+loki-data/
+grafana-data/
+alloy-data/
+
+# Editor and tooling noise.
+.vscode/
+.idea/
+node_modules/
