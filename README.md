@@ -86,17 +86,9 @@ docker-compose.yml             Central monitoring stack
 docker-compose.collector.yml   Collector-only stack for each VM
 ```
 
-## More Docs
+## Docs
 
 - [Architecture](docs/architecture.md)
 - [VM Collector Rollout](docs/vm-collector.md)
 - [Operations](docs/operations.md)
 - [Security Notes](docs/security.md)
-
-## Validation
-
-```bash
-GRAFANA_ADMIN_PASSWORD=validate-only scripts/monitoring.sh central validate
-MONITORING_SERVER=127.0.0.1 MONITOR_HOSTNAME=test-vm scripts/monitoring.sh collector validate
-jq empty grafana/dashboards/*.json
-```
