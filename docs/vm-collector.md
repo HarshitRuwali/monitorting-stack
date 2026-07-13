@@ -16,6 +16,7 @@ Copy these files to the VM:
 ```text
 docker-compose.collector.yml
 alloy/config.alloy
+scripts/monitoring.sh
 ```
 
 Start the collector:
@@ -24,8 +25,10 @@ Start the collector:
 export MONITORING_SERVER=<central-server-ip-or-dns>
 export MONITOR_HOSTNAME=<stable-vm-name>
 export MONITOR_ROLE=vm
-docker compose -f docker-compose.collector.yml up -d
+scripts/monitoring.sh collector up
 ```
+
+The script creates the external `monitoring-alloy-data` Docker volume, validates config, and starts Alloy.
 
 Use a stable `MONITOR_HOSTNAME`; changing it creates a new host identity in Prometheus and Loki.
 
@@ -34,7 +37,7 @@ Use a stable `MONITOR_HOSTNAME`; changing it creates a new host identity in Prom
 On the VM:
 
 ```bash
-docker compose -f docker-compose.collector.yml ps
+scripts/monitoring.sh collector status
 docker logs monitoring-collector --tail 100
 ```
 

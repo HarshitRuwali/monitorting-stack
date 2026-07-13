@@ -89,9 +89,17 @@ services:
 
 volumes:
   grafana-data:
+    name: monitoring-grafana-data
+    external: true
   prometheus-data:
+    name: monitoring-prometheus-data
+    external: true
   loki-data:
+    name: monitoring-loki-data
+    external: true
   alloy-data:
+    name: monitoring-alloy-data
+    external: true
 
 networks:
   monitoring:

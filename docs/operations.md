@@ -1,16 +1,56 @@
 # Operations
 
-## Start and Stop
+## Lifecycle Script
+
+Use `scripts/monitoring.sh` for normal setup and lifecycle commands. It creates required external Docker volumes, validates environment variables, and runs the correct Compose file.
 
 ```bash
+scripts/monitoring.sh central init
+scripts/monitoring.sh central validate
+scripts/monitoring.sh central up
+scripts/monitoring.sh central status
+scripts/monitoring.sh central logs
+scripts/monitoring.sh central down
+```
+
+For a VM collector, use the `collector` mode:
+
+```bash
+export MONITORING_SERVER=<central-server-ip-or-dns>
+export MONITOR_HOSTNAME=<vm-name>
+scripts/monitoring.sh collector up
+```
+
+## Start and Stop Manually
+
+The script is preferred, but the equivalent central commands are:
+
+```bash
+docker volume create monitoring-grafana-data
+docker volume create monitoring-prometheus-data
+docker volume create monitoring-loki-data
+docker volume create monitoring-alloy-data
 docker compose up -d
 docker compose ps
 docker compose down
 ```
 
-Use `docker compose down` to stop containers while keeping Docker volumes. Do not use `--volumes` unless you want to delete monitoring history.
+Use `docker compose down` to stop containers. The central stack stores monitoring history in external Docker volumes, so even `docker compose down -v` will not delete Prometheus, Loki, Grafana, or Alloy data.
+
+To intentionally delete monitoring history:
+
+```bash
+docker compose down
+docker volume rm monitoring-grafana-data monitoring-prometheus-data monitoring-loki-data monitoring-alloy-data
+```
 
 ## Logs
+
+```bash
+scripts/monitoring.sh central logs
+```
+
+Or directly with Compose:
 
 ```bash
 docker compose logs -f grafana
@@ -53,5 +93,5 @@ In Grafana Explore, use Loki queries like:
 Restart the stack after retention config changes:
 
 ```bash
-docker compose up -d
+scripts/monitoring.sh central restart
 ```

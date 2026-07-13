@@ -26,6 +26,7 @@ services:
       - /var/log/journal:/var/log/journal:ro
       - /run/log/journal:/run/log/journal:ro
     restart: unless-stopped
-
 volumes:
   alloy-data:
+    name: monitoring-alloy-data
+    external: true

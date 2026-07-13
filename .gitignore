@@ -3,13 +3,9 @@
 *.log
 .DS_Store
 
-# Local runtime data if bind mounts are used instead of named volumes.
+# Local runtime files if you add bind mounts or ad hoc exports. Keep this out of git.
 data/
 logs/
-prometheus-data/
-loki-data/
-grafana-data/
-alloy-data/
 
 # Editor and tooling noise.
 .vscode/

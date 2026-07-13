@@ -9,7 +9,7 @@ Self-hosted monitoring for a Proxmox host, Linux VMs, and Docker-based applicati
 - `loki`: persistent log storage on port `3100`.
 - `collector`: Grafana Alloy agent for host metrics, systemd state, Docker metrics, journal logs, and Docker logs.
 
-Prometheus, Loki, Grafana, and Alloy state are stored in Docker volumes so data survives container restarts.
+Prometheus, Loki, Grafana, and Alloy state are stored in external Docker volumes. External volumes survive container restarts and are not removed by `docker compose down -v`.
 
 ## Quick Start
 
@@ -29,8 +29,10 @@ MONITOR_HOSTNAME=<central-server-name>
 3. Start the central stack:
 
 ```bash
-docker compose up -d
+scripts/monitoring.sh central up
 ```
+
+The script creates the external Docker volumes, validates the Compose config, and starts the services.
 
 4. Open Grafana:
 
@@ -42,16 +44,25 @@ The default Grafana user is `admin` unless you change `GRAFANA_ADMIN_USER`.
 
 ## Add VM Collectors
 
-Copy this repository, or at least `docker-compose.collector.yml` and `alloy/config.alloy`, to each VM. Then run:
+Copy this repository, or at least `docker-compose.collector.yml`, `alloy/config.alloy`, and `scripts/monitoring.sh`, to each VM. Then run:
 
 ```bash
 export MONITORING_SERVER=<central-server-ip-or-dns>
 export MONITOR_HOSTNAME=<vm-name>
 export MONITOR_ROLE=vm
-docker compose -f docker-compose.collector.yml up -d
+scripts/monitoring.sh collector up
 ```
 
-After one or two minutes, the VM should appear in the dashboard host selector.
+The script creates the collector external volume, validates the collector Compose config, and starts Alloy. After one or two minutes, the VM should appear in the dashboard host selector.
+
+## Useful Commands
+
+```bash
+scripts/monitoring.sh central status
+scripts/monitoring.sh central logs
+scripts/monitoring.sh central down
+scripts/monitoring.sh collector status
+```
 
 ## Dashboards
 
@@ -70,6 +81,7 @@ grafana/dashboards/            Provisioned Grafana dashboards
 grafana/provisioning/          Grafana datasource and dashboard provisioning
 loki/                          Loki local filesystem storage config
 prometheus/                    Prometheus scrape/storage config
+scripts/monitoring.sh          Setup and lifecycle automation
 docker-compose.yml             Central monitoring stack
 docker-compose.collector.yml   Collector-only stack for each VM
 ```
@@ -84,7 +96,7 @@ docker-compose.collector.yml   Collector-only stack for each VM
 ## Validation
 
 ```bash
-GRAFANA_ADMIN_PASSWORD=validate-only docker compose config
-MONITORING_SERVER=127.0.0.1 MONITOR_HOSTNAME=test-vm docker compose -f docker-compose.collector.yml config
+GRAFANA_ADMIN_PASSWORD=validate-only scripts/monitoring.sh central validate
+MONITORING_SERVER=127.0.0.1 MONITOR_HOSTNAME=test-vm scripts/monitoring.sh collector validate
 jq empty grafana/dashboards/*.json
 ```

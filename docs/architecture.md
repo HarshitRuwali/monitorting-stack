@@ -7,8 +7,8 @@ This repository contains one central monitoring stack and one reusable collector
 `docker-compose.yml` runs four services:
 
 - Grafana reads Prometheus and Loki as provisioned data sources.
-- Prometheus stores metrics locally in the `prometheus-data` Docker volume.
-- Loki stores logs locally in the `loki-data` Docker volume.
+- Prometheus stores metrics in the external `monitoring-prometheus-data` Docker volume.
+- Loki stores logs in the external `monitoring-loki-data` Docker volume.
 - Alloy collects telemetry for the central server and sends it to Prometheus and Loki.
 
 ## Collector Flow
@@ -35,12 +35,12 @@ Linux host / VM
 
 ## Persistence
 
-Docker volumes keep state across restarts:
+External Docker volumes keep state across restarts and survive `docker compose down -v`:
 
-- `grafana-data`: users, sessions, local Grafana state.
-- `prometheus-data`: Prometheus TSDB blocks and WAL.
-- `loki-data`: Loki chunks, indexes, rules, and compactor state.
-- `alloy-data`: Alloy WAL/positions for reliable forwarding.
+- `monitoring-grafana-data`: users, sessions, local Grafana state.
+- `monitoring-prometheus-data`: Prometheus TSDB blocks and WAL.
+- `monitoring-loki-data`: Loki chunks, indexes, rules, and compactor state.
+- `monitoring-alloy-data`: Alloy WAL/positions for reliable forwarding.
 
 The default Prometheus and Loki retention is 30 days. Prometheus retention is controlled by `PROMETHEUS_RETENTION`; Loki retention is set in `loki/loki-config.yml`.
 
