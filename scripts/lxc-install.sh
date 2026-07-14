@@ -233,14 +233,14 @@ ExecStart=
 ExecStart=/usr/bin/loki -config.file=/etc/loki/loki-config.yml
 EOF
 
+  groupadd --system loki 2>/dev/null || true
   if id -u loki >/dev/null 2>&1; then
-    chown -R loki:loki /var/lib/loki /etc/loki
+    usermod -g loki loki 2>/dev/null || true
   else
-    log "Creating loki user and group."
-    groupadd --system loki 2>/dev/null || true
+    log "Creating loki user."
     useradd --system --gid loki --no-create-home --shell /usr/sbin/nologin loki 2>/dev/null || true
-    chown -R loki:loki /var/lib/loki /etc/loki
   fi
+  chown -R loki:loki /var/lib/loki /etc/loki
 }
 
 write_grafana_config() {
