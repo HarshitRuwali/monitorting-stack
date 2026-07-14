@@ -113,15 +113,23 @@ require_var() {
 require_central_env() {
   load_env_file
   require_var GRAFANA_ADMIN_PASSWORD
+  require_var COLLECTOR_BASIC_AUTH_PASSWORD
   if [[ "${GRAFANA_ADMIN_PASSWORD}" == "replace-with-a-strong-password" || "${GRAFANA_ADMIN_PASSWORD}" == "<strong-password>" ]]; then
     fail "Set a real GRAFANA_ADMIN_PASSWORD in .env before starting the central stack."
+  fi
+  if [[ "${COLLECTOR_BASIC_AUTH_PASSWORD}" == "replace-with-a-strong-collector-password" || "${COLLECTOR_BASIC_AUTH_PASSWORD}" == "<strong-password>" ]]; then
+    fail "Set a real COLLECTOR_BASIC_AUTH_PASSWORD in .env before starting the central stack."
   fi
 }
 
 require_collector_env() {
   load_env_file
-  require_var MONITORING_SERVER
   require_var MONITOR_HOSTNAME
+  require_var COLLECTOR_BASIC_AUTH_PASSWORD
+
+  if [[ -z "${MONITORING_SERVER:-}" && ( -z "${PROMETHEUS_REMOTE_WRITE_URL:-}" || -z "${LOKI_WRITE_URL:-}" ) ]]; then
+    fail "Set MONITORING_SERVER, or set both PROMETHEUS_REMOTE_WRITE_URL and LOKI_WRITE_URL."
+  fi
 }
 
 create_volumes() {

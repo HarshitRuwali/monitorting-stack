@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$ROOT_DIR/.env"
 
-PACKAGES=(grafana prometheus loki alloy)
+PACKAGES=(grafana prometheus loki alloy nginx apache2-utils)
 CONFIG_ONLY=0
 NO_START=0
 
@@ -30,6 +30,10 @@ Useful environment variables:
   PROMETHEUS_RETENTION     default: 30d
   MONITOR_HOSTNAME         default: current hostname
   MONITOR_ROLE             default: central-lxc
+  PUBLIC_DOMAIN            default: _
+  MONITORING_LISTEN_ADDRESS default: 127.0.0.1
+  COLLECTOR_BASIC_AUTH_USER default: collector
+  COLLECTOR_BASIC_AUTH_PASSWORD required
 
 Options:
   --config-only  Only render configs/dashboards and systemd overrides.
@@ -91,8 +95,12 @@ require_var() {
 
 reject_placeholder_password() {
   require_var GRAFANA_ADMIN_PASSWORD
+  require_var COLLECTOR_BASIC_AUTH_PASSWORD
   if [[ "${GRAFANA_ADMIN_PASSWORD}" == "replace-with-a-strong-password" || "${GRAFANA_ADMIN_PASSWORD}" == "<strong-password>" ]]; then
     fail "Set a real GRAFANA_ADMIN_PASSWORD before installing the LXC stack."
+  fi
+  if [[ "${COLLECTOR_BASIC_AUTH_PASSWORD}" == "replace-with-a-strong-collector-password" || "${COLLECTOR_BASIC_AUTH_PASSWORD}" == "<strong-password>" ]]; then
+    fail "Set a real COLLECTOR_BASIC_AUTH_PASSWORD before installing the LXC stack."
   fi
 }
 
@@ -127,6 +135,7 @@ install_packages() {
 
 write_prometheus_config() {
   local retention="${PROMETHEUS_RETENTION:-30d}"
+  local listen_addr="${MONITORING_LISTEN_ADDRESS:-127.0.0.1}"
 
   log "Writing Prometheus config."
   install -d -m 0755 /etc/prometheus /var/lib/prometheus
@@ -151,7 +160,7 @@ EOF
   cat > /etc/systemd/system/prometheus.service.d/monitoring.conf <<EOF
 [Service]
 ExecStart=
-ExecStart=/usr/bin/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/var/lib/prometheus --storage.tsdb.retention.time=${retention} --web.enable-remote-write-receiver --web.enable-lifecycle --web.listen-address=0.0.0.0:9090
+ExecStart=/usr/bin/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/var/lib/prometheus --storage.tsdb.retention.time=${retention} --web.enable-remote-write-receiver --web.enable-lifecycle --web.listen-address=${listen_addr}:9090
 EOF
 
   if id -u prometheus >/dev/null 2>&1; then
@@ -160,13 +169,15 @@ EOF
 }
 
 write_loki_config() {
+  local listen_addr="${MONITORING_LISTEN_ADDRESS:-127.0.0.1}"
+
   log "Writing Loki config."
   install -d -m 0755 /etc/loki /var/lib/loki/chunks /var/lib/loki/rules /var/lib/loki/compactor
-  cat > /etc/loki/loki-config.yml <<'EOF'
+  cat > /etc/loki/loki-config.yml <<EOF
 auth_enabled: false
 
 server:
-  http_listen_address: 0.0.0.0
+  http_listen_address: ${listen_addr}
   http_listen_port: 3100
   grpc_listen_port: 9096
 
@@ -230,6 +241,7 @@ EOF
 
 write_grafana_config() {
   local env_file="/etc/default/grafana-monitoring"
+  local listen_addr="${MONITORING_LISTEN_ADDRESS:-127.0.0.1}"
   local dashboard
 
   log "Writing Grafana provisioning config."
@@ -277,7 +289,13 @@ EOF
   write_env_assignment "$env_file" GF_SECURITY_ADMIN_USER "${GRAFANA_ADMIN_USER:-admin}"
   write_env_assignment "$env_file" GF_SECURITY_ADMIN_PASSWORD "${GRAFANA_ADMIN_PASSWORD}"
   write_env_assignment "$env_file" GF_SERVER_ROOT_URL "${GRAFANA_ROOT_URL:-http://localhost:3000}"
+  write_env_assignment "$env_file" GF_SERVER_HTTP_ADDR "$listen_addr"
+  write_env_assignment "$env_file" GF_AUTH_ANONYMOUS_ENABLED "false"
   write_env_assignment "$env_file" GF_USERS_ALLOW_SIGN_UP "false"
+  write_env_assignment "$env_file" GF_SECURITY_COOKIE_SECURE "${GRAFANA_COOKIE_SECURE:-true}"
+  write_env_assignment "$env_file" GF_SECURITY_COOKIE_SAMESITE "strict"
+  write_env_assignment "$env_file" GF_SECURITY_DISABLE_GRAVATAR "true"
+  write_env_assignment "$env_file" GF_SNAPSHOTS_EXTERNAL_ENABLED "false"
 
   cat > /etc/systemd/system/grafana-server.service.d/monitoring.conf <<'EOF'
 [Service]
@@ -312,6 +330,11 @@ prometheus.remote_write "central" {
   endpoint {
     name = "central-prometheus"
     url  = sys.env("PROMETHEUS_REMOTE_WRITE_URL")
+
+    basic_auth {
+      username = sys.env("COLLECTOR_BASIC_AUTH_USER")
+      password = sys.env("COLLECTOR_BASIC_AUTH_PASSWORD")
+    }
   }
 }
 
@@ -351,6 +374,11 @@ loki.write "central" {
   endpoint {
     name = "central-loki"
     url  = sys.env("LOKI_WRITE_URL")
+
+    basic_auth {
+      username = sys.env("COLLECTOR_BASIC_AUTH_USER")
+      password = sys.env("COLLECTOR_BASIC_AUTH_PASSWORD")
+    }
   }
 }
 
@@ -438,6 +466,8 @@ EOF
   write_env_assignment "$env_file" MONITOR_ROLE "$host_role"
   write_env_assignment "$env_file" PROMETHEUS_REMOTE_WRITE_URL "http://127.0.0.1:9090/api/v1/write"
   write_env_assignment "$env_file" LOKI_WRITE_URL "http://127.0.0.1:3100/loki/api/v1/push"
+  write_env_assignment "$env_file" COLLECTOR_BASIC_AUTH_USER "${COLLECTOR_BASIC_AUTH_USER:-collector}"
+  write_env_assignment "$env_file" COLLECTOR_BASIC_AUTH_PASSWORD "$COLLECTOR_BASIC_AUTH_PASSWORD"
 
   if id -u alloy >/dev/null 2>&1; then
     chown -R alloy:alloy /var/lib/alloy /etc/alloy
@@ -447,11 +477,86 @@ EOF
   fi
 }
 
+
+write_nginx_config() {
+  local domain="${PUBLIC_DOMAIN:-_}"
+  local listen_addr="${MONITORING_LISTEN_ADDRESS:-127.0.0.1}"
+  local auth_user="${COLLECTOR_BASIC_AUTH_USER:-collector}"
+  local htpasswd_file="/etc/nginx/monitoring-collectors.htpasswd"
+
+  log "Writing nginx public reverse proxy config."
+  has_cmd htpasswd || fail "htpasswd is required. Install apache2-utils or run scripts/lxc-install.sh without --config-only first."
+  has_cmd nginx || fail "nginx is required. Install nginx or run scripts/lxc-install.sh without --config-only first."
+  install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
+  htpasswd -bcB "$htpasswd_file" "$auth_user" "$COLLECTOR_BASIC_AUTH_PASSWORD" >/dev/null
+  chmod 0640 "$htpasswd_file"
+  chown root:www-data "$htpasswd_file" 2>/dev/null || chown root:root "$htpasswd_file"
+
+  cat > /etc/nginx/sites-available/monitoring.conf <<EOF
+server {
+  listen 80;
+  server_name ${domain};
+
+  client_max_body_size 50m;
+
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header X-Frame-Options "SAMEORIGIN" always;
+  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+  location /api/live/ {
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_pass http://${listen_addr}:3000;
+  }
+
+  location /prometheus/ {
+    auth_basic "collector metrics ingest";
+    auth_basic_user_file ${htpasswd_file};
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_pass http://${listen_addr}:9090/;
+  }
+
+  location /loki/ {
+    auth_basic "collector logs ingest";
+    auth_basic_user_file ${htpasswd_file};
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_pass http://${listen_addr}:3100;
+  }
+
+  location / {
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_pass http://${listen_addr}:3000;
+  }
+}
+EOF
+
+  rm -f /etc/nginx/sites-enabled/default
+  ln -sfn /etc/nginx/sites-available/monitoring.conf /etc/nginx/sites-enabled/monitoring.conf
+  nginx -t
+}
+
 enable_and_restart_services() {
   log "Enabling and restarting services."
   systemctl daemon-reload
-  systemctl enable prometheus loki grafana-server alloy
-  systemctl restart prometheus loki grafana-server alloy
+  systemctl enable prometheus loki grafana-server alloy nginx
+  systemctl restart prometheus loki grafana-server alloy nginx
 }
 
 render_configs() {
@@ -461,6 +566,7 @@ render_configs() {
   write_loki_config
   write_grafana_config
   write_alloy_config
+  write_nginx_config
 }
 
 main() {
@@ -490,7 +596,7 @@ main() {
     log "Configs written. Services were not started because --no-start was used."
   fi
 
-  log "LXC monitoring stack is ready. Grafana listens on port 3000."
+  log "LXC monitoring stack is ready. nginx listens on port 80 and proxies Grafana plus authenticated collector ingest paths."
 }
 
 main "$@"

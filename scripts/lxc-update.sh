@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_SCRIPT="$ROOT_DIR/scripts/lxc-install.sh"
 
-PACKAGES=(grafana prometheus loki alloy)
+PACKAGES=(grafana prometheus loki alloy nginx apache2-utils)
 CONFIG_ONLY=0
 NO_RESTART=0
 SKIP_PACKAGE_UPGRADE=0
@@ -80,7 +80,7 @@ restart_services() {
   fi
 
   log "Restarting monitoring services."
-  systemctl restart prometheus loki grafana-server alloy
+  systemctl restart prometheus loki grafana-server alloy nginx
 }
 
 main() {

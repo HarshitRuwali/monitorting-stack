@@ -23,7 +23,16 @@ cp .env.example .env
 
 ```bash
 GRAFANA_ADMIN_PASSWORD=<strong-password>
+COLLECTOR_BASIC_AUTH_PASSWORD=<strong-collector-password>
 MONITOR_HOSTNAME=<central-server-name>
+```
+
+For a public domain, also set:
+
+```bash
+GRAFANA_ROOT_URL=https://monitor.example.com
+GRAFANA_COOKIE_SECURE=true
+PUBLIC_DOMAIN=monitor.example.com
 ```
 
 3. Start the central stack:
@@ -37,17 +46,32 @@ The script creates the external Docker volumes, validates the Compose config, an
 4. Open Grafana:
 
 ```text
-http://<central-server-ip>:3000
+http://127.0.0.1:3000
 ```
 
-The default Grafana user is `admin` unless you change `GRAFANA_ADMIN_USER`.
+For a public domain, put a TLS reverse proxy in front of Grafana and expose only the proxy. The default Grafana user is `admin` unless you change `GRAFANA_ADMIN_USER`.
+
+## Public Domain Setup
+
+Do not expose raw Grafana, Prometheus, Loki, or Alloy ports directly to the internet. The secure public shape is:
+
+```text
+https://monitor.example.com/                    -> Grafana login UI
+https://monitor.example.com/prometheus/api/v1/write -> Basic Auth collector metrics ingest
+https://monitor.example.com/loki/api/v1/push         -> Basic Auth collector log ingest
+```
+
+The direct-LXC installer writes an nginx reverse proxy for those paths. For Docker Compose, the service ports bind to `127.0.0.1` by default so you can put your own TLS reverse proxy in front.
 
 ## Add VM Collectors
 
 Copy this repository, or at least `docker-compose.collector.yml`, `alloy/config.alloy`, and `scripts/monitoring.sh`, to each VM. Then run:
 
 ```bash
-export MONITORING_SERVER=<central-server-ip-or-dns>
+export PROMETHEUS_REMOTE_WRITE_URL=https://monitor.example.com/prometheus/api/v1/write
+export LOKI_WRITE_URL=https://monitor.example.com/loki/api/v1/push
+export COLLECTOR_BASIC_AUTH_USER=collector
+export COLLECTOR_BASIC_AUTH_PASSWORD=<strong-collector-password>
 export MONITOR_HOSTNAME=<vm-name>
 export MONITOR_ROLE=vm
 scripts/monitoring.sh collector up
@@ -81,7 +105,9 @@ grafana/dashboards/            Provisioned Grafana dashboards
 grafana/provisioning/          Grafana datasource and dashboard provisioning
 loki/                          Loki local filesystem storage config
 prometheus/                    Prometheus scrape/storage config
-scripts/monitoring.sh          Setup and lifecycle automation
+scripts/monitoring.sh          Docker setup and lifecycle automation
+scripts/lxc-install.sh         Direct LXC installer with nginx auth proxy
+scripts/lxc-update.sh          Direct LXC update and config sync helper
 docker-compose.yml             Central monitoring stack
 docker-compose.collector.yml   Collector-only stack for each VM
 ```

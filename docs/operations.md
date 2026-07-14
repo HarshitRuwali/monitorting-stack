@@ -16,7 +16,10 @@ scripts/monitoring.sh central down
 For a VM collector, use the `collector` mode:
 
 ```bash
-export MONITORING_SERVER=<central-server-ip-or-dns>
+export PROMETHEUS_REMOTE_WRITE_URL=https://monitor.example.com/prometheus/api/v1/write
+export LOKI_WRITE_URL=https://monitor.example.com/loki/api/v1/push
+export COLLECTOR_BASIC_AUTH_USER=collector
+export COLLECTOR_BASIC_AUTH_PASSWORD=<strong-collector-password>
 export MONITOR_HOSTNAME=<vm-name>
 scripts/monitoring.sh collector up
 ```
@@ -62,19 +65,21 @@ docker compose logs -f collector
 ## Health Checks
 
 ```bash
-curl http://localhost:3000/api/health
-curl http://localhost:9090/-/ready
-curl http://localhost:3100/ready
-curl http://localhost:12345/-/ready
+curl http://127.0.0.1:3000/api/health
+curl http://127.0.0.1:9090/-/ready
+curl http://127.0.0.1:3100/ready
+curl http://127.0.0.1:12345/-/ready
+curl -u collector:<collector-password> https://monitor.example.com/prometheus/-/ready
+curl -u collector:<collector-password> https://monitor.example.com/loki/ready
 ```
 
-The Alloy debug UI is bound to `127.0.0.1:12345` in the central stack.
+The Docker Compose stack binds Grafana, Prometheus, Loki, and the Alloy debug UI to `127.0.0.1` by default. Put a TLS reverse proxy in front for public-domain access.
 
 ## Query Smoke Tests
 
 ```bash
-curl 'http://localhost:9090/api/v1/query' --data-urlencode 'query=node_uname_info'
-curl 'http://localhost:9090/api/v1/query' --data-urlencode 'query=up{job="host-unix"}'
+curl 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=node_uname_info'
+curl 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=up{job="host-unix"}'
 ```
 
 In Grafana Explore, use Loki queries like:
