@@ -110,8 +110,7 @@ write_env_assignment() {
   local value="$3"
 
   [[ "$value" != *$'\n'* ]] || fail "$key cannot contain newlines."
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
+  # Use printf with %s to safely write the value without corrupting special chars
   printf '%s="%s"\n' "$key" "$value" >> "$file"
 }
 
@@ -236,6 +235,11 @@ EOF
 
   if id -u loki >/dev/null 2>&1; then
     chown -R loki:loki /var/lib/loki /etc/loki
+  else
+    log "Creating loki user and group."
+    groupadd --system loki 2>/dev/null || true
+    useradd --system --gid loki --no-create-home --shell /usr/sbin/nologin loki 2>/dev/null || true
+    chown -R loki:loki /var/lib/loki /etc/loki
   fi
 }
 
@@ -305,6 +309,17 @@ EOF
   if id -u grafana >/dev/null 2>&1; then
     chown -R grafana:grafana /var/lib/grafana/dashboards
   fi
+
+  log "Verifying Grafana admin credentials."
+  local admin_user admin_pass
+  admin_user="$(grep '^GF_SECURITY_ADMIN_USER=' "$env_file" | cut -d= -f2 | tr -d '"' | tr -d ' ')"
+  admin_pass="$(grep '^GF_SECURITY_ADMIN_PASSWORD=' "$env_file" | cut -d= -f2 | tr -d '"' | tr -d ' ')"
+  if [[ -z "$admin_user" || -z "$admin_pass" ]]; then
+    fail "Grafana admin credentials not found in $env_file. Check that GRAFANA_ADMIN_USER and GRAFANA_ADMIN_PASSWORD were set."
+  fi
+  log "Grafana admin user: '$admin_user'"
+  log "Grafana admin password: '***'"
+  log "Login URL: ${GRAFANA_ROOT_URL:-http://localhost:3000}"
 }
 
 write_alloy_config() {
