@@ -44,6 +44,6 @@ External Docker volumes keep state across restarts and survive `docker compose d
 
 The default Prometheus and Loki retention is 30 days. Prometheus retention is controlled by `PROMETHEUS_RETENTION`; Loki retention is set in `loki/loki-config.yml`.
 
-## Remote VMs
+## Remote Collectors
 
-Each remote VM runs `docker-compose.collector.yml`. The VM collector pushes metrics and logs to the central server, so the central server does not need to scrape every VM directly.
+Remote Docker-based VMs run `docker-compose.collector.yml`. Debian/Ubuntu LXC collectors can install Alloy directly with `scripts/lxc-install.sh collector`. Each collector pushes metrics and logs to the central server, so the central server does not need to scrape every host directly.

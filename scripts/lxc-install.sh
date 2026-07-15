@@ -4,14 +4,16 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$ROOT_DIR/.env"
 
-PACKAGES=(grafana prometheus loki alloy nginx apache2-utils)
+CENTRAL_PACKAGES=(grafana prometheus loki alloy nginx apache2-utils)
+COLLECTOR_PACKAGES=(alloy)
+LXC_MODE=central
 CONFIG_ONLY=0
 NO_START=0
 
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/lxc-install.sh [--config-only] [--no-start]
+  scripts/lxc-install.sh [central|collector] [--config-only] [--no-start]
 
 Installs the central monitoring stack directly into a Debian/Ubuntu LXC:
   - Grafana from the Grafana APT repository
@@ -19,17 +21,25 @@ Installs the central monitoring stack directly into a Debian/Ubuntu LXC:
   - Alloy from the Grafana APT repository
   - Prometheus from the distro APT repository
 
+Installs a collector-only LXC when run with the collector mode:
+  - Alloy from the Grafana APT repository
+  - Host metrics, systemd journal logs, and Docker telemetry when Docker exists
+  - Remote write/push to the central Prometheus and Loki ingest endpoints
+
 Required:
   Run as root inside a systemd-based LXC.
-  Set GRAFANA_ADMIN_PASSWORD in .env or export it before running.
+  Set required secrets in .env or export them before running.
 
 Useful environment variables:
+  MONITORING_SERVER        collector mode fallback for central host/IP
   GRAFANA_ADMIN_USER       default: admin
-  GRAFANA_ADMIN_PASSWORD   required
+  GRAFANA_ADMIN_PASSWORD   required for central mode
   GRAFANA_ROOT_URL         default: http://localhost:3000
   PROMETHEUS_RETENTION     default: 30d
   MONITOR_HOSTNAME         default: current hostname
-  MONITOR_ROLE             default: central-lxc
+  MONITOR_ROLE             default: central-lxc in central mode, lxc in collector mode
+  PROMETHEUS_REMOTE_WRITE_URL collector mode explicit metrics ingest URL
+  LOKI_WRITE_URL           collector mode explicit logs ingest URL
   PUBLIC_DOMAIN            default: _
   MONITORING_LISTEN_ADDRESS default: 127.0.0.1
   COLLECTOR_BASIC_AUTH_USER default: collector
@@ -93,14 +103,43 @@ require_var() {
   [[ -n "$value" ]] || fail "$name is required. Set it in .env or export it before running this command."
 }
 
-reject_placeholder_password() {
-  require_var GRAFANA_ADMIN_PASSWORD
+reject_placeholder_collector_password() {
   require_var COLLECTOR_BASIC_AUTH_PASSWORD
-  if [[ "${GRAFANA_ADMIN_PASSWORD}" == "replace-with-a-strong-password" || "${GRAFANA_ADMIN_PASSWORD}" == "<strong-password>" ]]; then
-    fail "Set a real GRAFANA_ADMIN_PASSWORD before installing the LXC stack."
-  fi
   if [[ "${COLLECTOR_BASIC_AUTH_PASSWORD}" == "replace-with-a-strong-collector-password" || "${COLLECTOR_BASIC_AUTH_PASSWORD}" == "<strong-password>" ]]; then
     fail "Set a real COLLECTOR_BASIC_AUTH_PASSWORD before installing the LXC stack."
+  fi
+}
+
+validate_central_env() {
+  require_var GRAFANA_ADMIN_PASSWORD
+  reject_placeholder_collector_password
+
+  if [[ "${GRAFANA_ADMIN_PASSWORD}" == "replace-with-a-strong-password" || "${GRAFANA_ADMIN_PASSWORD}" == "<strong-password>" ]]; then
+    fail "Set a real GRAFANA_ADMIN_PASSWORD before installing the central LXC stack."
+  fi
+}
+
+validate_collector_env() {
+  reject_placeholder_collector_password
+
+  if [[ -z "${MONITORING_SERVER:-}" && ( -z "${PROMETHEUS_REMOTE_WRITE_URL:-}" || -z "${LOKI_WRITE_URL:-}" ) ]]; then
+    fail "Set MONITORING_SERVER, or set both PROMETHEUS_REMOTE_WRITE_URL and LOKI_WRITE_URL for collector mode."
+  fi
+}
+
+collector_prometheus_remote_write_url() {
+  if [[ -n "${PROMETHEUS_REMOTE_WRITE_URL:-}" ]]; then
+    printf '%s\n' "$PROMETHEUS_REMOTE_WRITE_URL"
+  else
+    printf 'http://%s:9090/api/v1/write\n' "$MONITORING_SERVER"
+  fi
+}
+
+collector_loki_write_url() {
+  if [[ -n "${LOKI_WRITE_URL:-}" ]]; then
+    printf '%s\n' "$LOKI_WRITE_URL"
+  else
+    printf 'http://%s:3100/loki/api/v1/push\n' "$MONITORING_SERVER"
   fi
 }
 
@@ -115,6 +154,8 @@ write_env_assignment() {
 }
 
 install_packages() {
+  local packages=("$@")
+
   export DEBIAN_FRONTEND=noninteractive
 
   log "Installing APT prerequisites."
@@ -127,9 +168,9 @@ install_packages() {
   chmod 0644 /etc/apt/keyrings/grafana.asc
   printf 'deb [signed-by=/etc/apt/keyrings/grafana.asc] https://apt.grafana.com stable main\n' > /etc/apt/sources.list.d/grafana.list
 
-  log "Installing monitoring packages."
+  log "Installing monitoring packages: ${packages[*]}."
   apt-get update
-  apt-get install -y "${PACKAGES[@]}"
+  apt-get install -y "${packages[@]}"
 }
 
 write_prometheus_config() {
@@ -323,11 +364,30 @@ EOF
 }
 
 write_alloy_config() {
+  local mode="$1"
   local env_file="/etc/default/alloy"
   local host_name="${MONITOR_HOSTNAME:-$(hostname -s)}"
-  local host_role="${MONITOR_ROLE:-central-lxc}"
+  local host_role
+  local prometheus_url
+  local loki_url
 
-  log "Writing Alloy config."
+  case "$mode" in
+    central)
+      host_role="${MONITOR_ROLE:-central-lxc}"
+      prometheus_url="http://127.0.0.1:9090/api/v1/write"
+      loki_url="http://127.0.0.1:3100/loki/api/v1/push"
+      ;;
+    collector)
+      host_role="${MONITOR_ROLE:-lxc}"
+      prometheus_url="$(collector_prometheus_remote_write_url)"
+      loki_url="$(collector_loki_write_url)"
+      ;;
+    *)
+      fail "Unknown LXC mode: $mode"
+      ;;
+  esac
+
+  log "Writing Alloy config for $mode mode."
   install -d -m 0755 /etc/alloy /var/lib/alloy
 
   cat > /etc/alloy/config.alloy <<'EOF'
@@ -474,13 +534,13 @@ EOF
   fi
 
   : > "$env_file"
-  chmod 0644 "$env_file"
+  chmod 0600 "$env_file"
   write_env_assignment "$env_file" CONFIG_FILE "/etc/alloy/config.alloy"
   write_env_assignment "$env_file" CUSTOM_ARGS "--server.http.listen-addr=127.0.0.1:12345"
   write_env_assignment "$env_file" MONITOR_HOSTNAME "$host_name"
   write_env_assignment "$env_file" MONITOR_ROLE "$host_role"
-  write_env_assignment "$env_file" PROMETHEUS_REMOTE_WRITE_URL "http://127.0.0.1:9090/api/v1/write"
-  write_env_assignment "$env_file" LOKI_WRITE_URL "http://127.0.0.1:3100/loki/api/v1/push"
+  write_env_assignment "$env_file" PROMETHEUS_REMOTE_WRITE_URL "$prometheus_url"
+  write_env_assignment "$env_file" LOKI_WRITE_URL "$loki_url"
   write_env_assignment "$env_file" COLLECTOR_BASIC_AUTH_USER "${COLLECTOR_BASIC_AUTH_USER:-collector}"
   write_env_assignment "$env_file" COLLECTOR_BASIC_AUTH_PASSWORD "$COLLECTOR_BASIC_AUTH_PASSWORD"
 
@@ -567,26 +627,58 @@ EOF
   nginx -t
 }
 
+services_for_mode() {
+  case "$1" in
+    central) printf '%s\n' prometheus loki grafana-server alloy nginx ;;
+    collector) printf '%s\n' alloy ;;
+    *) fail "Unknown LXC mode: $1" ;;
+  esac
+}
+
+packages_for_mode() {
+  case "$1" in
+    central) printf '%s\n' "${CENTRAL_PACKAGES[@]}" ;;
+    collector) printf '%s\n' "${COLLECTOR_PACKAGES[@]}" ;;
+    *) fail "Unknown LXC mode: $1" ;;
+  esac
+}
+
 enable_and_restart_services() {
-  log "Enabling and restarting services."
+  local services
+  mapfile -t services < <(services_for_mode "$LXC_MODE")
+
+  log "Enabling and restarting services: ${services[*]}."
   systemctl daemon-reload
-  systemctl enable prometheus loki grafana-server alloy nginx
-  systemctl restart prometheus loki grafana-server alloy nginx
+  systemctl enable "${services[@]}"
+  systemctl restart "${services[@]}"
 }
 
 render_configs() {
   load_env_file
-  reject_placeholder_password
-  write_prometheus_config
-  write_loki_config
-  write_grafana_config
-  write_alloy_config
-  write_nginx_config
+
+  case "$LXC_MODE" in
+    central)
+      validate_central_env
+      write_prometheus_config
+      write_loki_config
+      write_grafana_config
+      write_alloy_config central
+      write_nginx_config
+      ;;
+    collector)
+      validate_collector_env
+      write_alloy_config collector
+      ;;
+    *)
+      fail "Unknown LXC mode: $LXC_MODE"
+      ;;
+  esac
 }
 
 main() {
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
+      central|collector) LXC_MODE="$1" ;;
       --config-only) CONFIG_ONLY=1 ;;
       --no-start) NO_START=1 ;;
       -h|--help) usage; exit 0 ;;
@@ -599,7 +691,9 @@ main() {
   cd "$ROOT_DIR"
 
   if [[ "$CONFIG_ONLY" -eq 0 ]]; then
-    install_packages
+    local packages
+    mapfile -t packages < <(packages_for_mode "$LXC_MODE")
+    install_packages "${packages[@]}"
   fi
 
   render_configs
@@ -611,7 +705,14 @@ main() {
     log "Configs written. Services were not started because --no-start was used."
   fi
 
-  log "LXC monitoring stack is ready. nginx listens on port 80 and proxies Grafana plus authenticated collector ingest paths."
+  case "$LXC_MODE" in
+    central)
+      log "LXC monitoring stack is ready. nginx listens on port 80 and proxies Grafana plus authenticated collector ingest paths."
+      ;;
+    collector)
+      log "LXC collector is ready. Alloy is configured to push metrics and logs to the central ingest endpoints."
+      ;;
+  esac
 }
 
 main "$@"

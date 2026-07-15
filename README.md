@@ -63,9 +63,9 @@ https://monitor.example.com/loki/api/v1/push         -> Basic Auth collector log
 
 The direct-LXC installer writes an nginx reverse proxy for those paths. For Docker Compose, the service ports bind to `127.0.0.1` by default so you can put your own TLS reverse proxy in front.
 
-## Add VM Collectors
+## Add VM or LXC Collectors
 
-Copy this repository, or at least `docker-compose.collector.yml`, `alloy/config.alloy`, and `scripts/monitoring.sh`, to each VM. Then run:
+For Docker-based VMs, copy this repository, or at least `docker-compose.collector.yml`, `alloy/config.alloy`, and `scripts/monitoring.sh`, to each VM. Then run:
 
 ```bash
 export PROMETHEUS_REMOTE_WRITE_URL=https://monitor.example.com/prometheus/api/v1/write
@@ -77,7 +77,19 @@ export MONITOR_ROLE=vm
 scripts/monitoring.sh collector up
 ```
 
-The script creates the collector external volume, validates the collector Compose config, and starts Alloy. After one or two minutes, the VM should appear in the dashboard host selector.
+For Debian/Ubuntu LXC collectors without Docker Compose, copy the repository and run the direct installer in collector mode:
+
+```bash
+export PROMETHEUS_REMOTE_WRITE_URL=https://monitor.example.com/prometheus/api/v1/write
+export LOKI_WRITE_URL=https://monitor.example.com/loki/api/v1/push
+export COLLECTOR_BASIC_AUTH_USER=collector
+export COLLECTOR_BASIC_AUTH_PASSWORD=<strong-collector-password>
+export MONITOR_HOSTNAME=<lxc-name>
+export MONITOR_ROLE=lxc
+scripts/lxc-install.sh collector
+```
+
+After one or two minutes, the VM or LXC should appear in the dashboard host selector. Use `scripts/lxc-update.sh collector` to update a direct LXC collector.
 
 ## Useful Commands
 
@@ -106,8 +118,8 @@ grafana/provisioning/          Grafana datasource and dashboard provisioning
 loki/                          Loki local filesystem storage config
 prometheus/                    Prometheus scrape/storage config
 scripts/monitoring.sh          Docker setup and lifecycle automation
-scripts/lxc-install.sh         Direct LXC installer with nginx auth proxy
-scripts/lxc-update.sh          Direct LXC update and config sync helper
+scripts/lxc-install.sh         Direct LXC central/collector installer with nginx auth proxy
+scripts/lxc-update.sh          Direct LXC central/collector update and config sync helper
 docker-compose.yml             Central monitoring stack
 docker-compose.collector.yml   Collector-only stack for each VM
 ```
@@ -115,6 +127,6 @@ docker-compose.collector.yml   Collector-only stack for each VM
 ## Docs
 
 - [Architecture](docs/architecture.md)
-- [VM Collector Rollout](docs/vm-collector.md)
+- [VM and LXC Collector Rollout](docs/vm-collector.md)
 - [Operations](docs/operations.md)
 - [Security Notes](docs/security.md)

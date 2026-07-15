@@ -4,7 +4,9 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_SCRIPT="$ROOT_DIR/scripts/lxc-install.sh"
 
-PACKAGES=(grafana prometheus loki alloy nginx apache2-utils)
+CENTRAL_PACKAGES=(grafana prometheus loki alloy nginx apache2-utils)
+COLLECTOR_PACKAGES=(alloy)
+LXC_MODE=central
 CONFIG_ONLY=0
 NO_RESTART=0
 SKIP_PACKAGE_UPGRADE=0
@@ -12,15 +14,16 @@ SKIP_PACKAGE_UPGRADE=0
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/lxc-update.sh [--config-only] [--skip-package-upgrade] [--no-restart]
+  scripts/lxc-update.sh [central|collector] [--config-only] [--skip-package-upgrade] [--no-restart]
 
 Updates a direct LXC monitoring install created by scripts/lxc-install.sh.
+Central mode is the default; collector mode updates an Alloy-only LXC collector.
 
 What it does:
-  - Upgrades Grafana, Prometheus, Loki, and Alloy packages unless skipped.
-  - Re-syncs Grafana dashboards/provisioning from this repository.
-  - Re-renders Prometheus, Loki, and Alloy configs for the LXC layout.
-  - Restarts services unless --no-restart is used.
+  - Upgrades the packages for the selected mode unless skipped.
+  - Re-syncs Grafana dashboards/provisioning for central mode.
+  - Re-renders configs for the selected LXC layout.
+  - Restarts the selected mode's services unless --no-restart is used.
 
 Options:
   --config-only           Do not upgrade packages; only sync config.
@@ -50,42 +53,68 @@ require_root() {
   [[ -x "$INSTALL_SCRIPT" ]] || fail "Missing executable installer: $INSTALL_SCRIPT"
 }
 
+packages_for_mode() {
+  case "$1" in
+    central) printf '%s\n' "${CENTRAL_PACKAGES[@]}" ;;
+    collector) printf '%s\n' "${COLLECTOR_PACKAGES[@]}" ;;
+    *) fail "Unknown LXC mode: $1" ;;
+  esac
+}
+
+services_for_mode() {
+  case "$1" in
+    central) printf '%s\n' prometheus loki grafana-server alloy nginx ;;
+    collector) printf '%s\n' alloy ;;
+    *) fail "Unknown LXC mode: $1" ;;
+  esac
+}
+
 require_installed_packages() {
   local package
-  for package in "${PACKAGES[@]}"; do
-    dpkg -s "$package" >/dev/null 2>&1 || fail "$package is not installed. Run scripts/lxc-install.sh first."
+  local packages
+  mapfile -t packages < <(packages_for_mode "$LXC_MODE")
+
+  for package in "${packages[@]}"; do
+    dpkg -s "$package" >/dev/null 2>&1 || fail "$package is not installed. Run scripts/lxc-install.sh $LXC_MODE first."
   done
 }
 
 upgrade_packages() {
+  local packages
+  mapfile -t packages < <(packages_for_mode "$LXC_MODE")
+
   export DEBIAN_FRONTEND=noninteractive
 
   require_installed_packages
-  log "Upgrading monitoring packages."
+  log "Upgrading monitoring packages: ${packages[*]}."
   apt-get update
-  apt-get install --only-upgrade -y "${PACKAGES[@]}"
+  apt-get install --only-upgrade -y "${packages[@]}"
 }
 
 sync_configs() {
-  local args=(--config-only --no-start)
+  local args=("$LXC_MODE" --config-only --no-start)
 
-  log "Re-syncing LXC configs and dashboards from repository."
+  log "Re-syncing LXC configs from repository for $LXC_MODE mode."
   "$INSTALL_SCRIPT" "${args[@]}"
 }
 
 restart_services() {
+  local services
+
   if [[ "$NO_RESTART" -eq 1 ]]; then
     log "Services were not restarted because --no-restart was used."
     return
   fi
 
-  log "Restarting monitoring services."
-  systemctl restart prometheus loki grafana-server alloy nginx
+  mapfile -t services < <(services_for_mode "$LXC_MODE")
+  log "Restarting monitoring services: ${services[*]}."
+  systemctl restart "${services[@]}"
 }
 
 main() {
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
+      central|collector) LXC_MODE="$1" ;;
       --config-only) CONFIG_ONLY=1 ;;
       --skip-package-upgrade) SKIP_PACKAGE_UPGRADE=1 ;;
       --no-restart) NO_RESTART=1 ;;
@@ -104,7 +133,7 @@ main() {
 
   sync_configs
   restart_services
-  log "LXC monitoring stack update complete."
+  log "LXC $LXC_MODE update complete."
 }
 
 main "$@"

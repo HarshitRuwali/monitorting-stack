@@ -1,15 +1,15 @@
-# VM Collector Rollout
+# VM and LXC Collector Rollout
 
-Use `docker-compose.collector.yml` on every VM you want in the central dashboard.
+Use `docker-compose.collector.yml` on Docker-based VMs. Use `scripts/lxc-install.sh collector` when you want Alloy installed directly inside a Debian/Ubuntu LXC.
 
 ## Requirements
 
-- Docker and Docker Compose plugin installed on the VM.
-- Network access from the VM to the authenticated public HTTPS ingest paths, or private access to central ports `9090` and `3100` on a trusted LAN/VPN.
-- Linux host paths available for metrics/log collection: `/proc`, `/sys`, `/var/run`, `/var/log/journal`, and `/run/log/journal`.
-- Docker socket access if the VM runs containers.
+- Network access from the collector to the authenticated public HTTPS ingest paths, or private access to central ports `9090` and `3100` on a trusted LAN/VPN.
+- Docker and Docker Compose plugin installed for the Docker collector path.
+- A root shell inside a systemd-based Debian/Ubuntu LXC for the direct LXC collector path.
+- Docker socket access only when the collector host also runs Docker containers.
 
-## Install
+## Docker Install
 
 Copy these files to the VM:
 
@@ -33,15 +33,42 @@ scripts/monitoring.sh collector up
 
 The script creates the external `monitoring-alloy-data` Docker volume, validates config, and starts Alloy. If you are not using public HTTPS ingest paths, you can still use `MONITORING_SERVER=<central-server-ip-or-dns>` for private LAN deployments.
 
+## Direct LXC Install
+
+Copy the repository to the LXC and run the direct installer in collector mode:
+
+```bash
+export PROMETHEUS_REMOTE_WRITE_URL=https://monitor.example.com/prometheus/api/v1/write
+export LOKI_WRITE_URL=https://monitor.example.com/loki/api/v1/push
+export COLLECTOR_BASIC_AUTH_USER=collector
+export COLLECTOR_BASIC_AUTH_PASSWORD=<strong-collector-password>
+export MONITOR_HOSTNAME=<stable-lxc-name>
+export MONITOR_ROLE=lxc
+scripts/lxc-install.sh collector
+```
+
+The installer adds the Grafana APT repository, installs Alloy, writes `/etc/alloy/config.alloy`, and enables the `alloy` systemd service. For updates, run:
+
+```bash
+scripts/lxc-update.sh collector
+```
+
 Use a stable `MONITOR_HOSTNAME`; changing it creates a new host identity in Prometheus and Loki.
 
 ## Verify
 
-On the VM:
+On a Docker collector:
 
 ```bash
 scripts/monitoring.sh collector status
 docker logs monitoring-collector --tail 100
+```
+
+On a direct LXC collector:
+
+```bash
+systemctl status alloy
+journalctl -u alloy -n 100 --no-pager
 ```
 
 On the central server:
@@ -56,6 +83,6 @@ In Grafana, open any dashboard and select the VM from the `host` variable.
 
 ## Notes
 
-- VMs without Docker still report host metrics and journal logs; Docker panels remain empty for those hosts.
+- VMs and LXCs without Docker still report host metrics and journal logs; Docker panels remain empty for those hosts.
 - If journald persistent storage is disabled, Alloy can still read runtime logs from `/run/log/journal` when available.
 - Collector debug UI is intentionally not published in `docker-compose.collector.yml`.
